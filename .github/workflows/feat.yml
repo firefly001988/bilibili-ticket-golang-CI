@@ -1,0 +1,400 @@
+name: Cross-Repo Build2
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_target:
+        description: "分发目标"
+        required: true
+        type: choice
+        default: "both"
+        options:
+          - "release-only"
+          - "telegram-only"
+          - "both"
+      source_repo:
+        description: "源仓库 (owner/repo，留空则用当前仓库)"
+        required: false
+        type: string
+        default: "firefly001988/bilibili-ticket-golang-private"
+      source_ref:
+        description: "源仓库分支/tag/commit (留空则用默认分支)"
+        required: false
+        type: string
+        default: "feat/employer-worker-cluster"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: cross-build-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            arch: amd64
+            os: windows-latest
+            ext: .exe
+            goos: windows
+            cgo: 0
+          - platform: windows
+            arch: arm64
+            os: windows-11-arm
+            ext: .exe
+            goos: windows
+            cgo: 0
+          - platform: linux
+            arch: amd64
+            os: ubuntu-24.04
+            ext: ""
+            goos: linux
+            cgo: 1
+          - platform: linux
+            arch: arm64
+            os: ubuntu-24.04-arm
+            ext: ""
+            goos: linux
+            cgo: 1
+          - platform: darwin
+            arch: amd64
+            os: macos-26-intel
+            ext: ""
+            goos: darwin
+            cgo: 1
+          - platform: darwin
+            arch: arm64
+            os: macos-26
+            ext: ""
+            goos: darwin
+            cgo: 1
+    runs-on: ${{ matrix.os }}
+    outputs:
+      commit_short: ${{ steps.set_commit.outputs.short }}
+    steps:
+      - name: Set build time
+        id: vars
+        shell: bash
+        run: |
+          echo "build_time=$(date -u +%Y%m%dT%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      # ── Cross-repo checkout ──
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo || github.repository }}
+          ref: ${{ inputs.source_ref || '' }}
+          token: ${{ secrets.CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Resolve short commit
+        id: set_commit
+        shell: bash
+        run: |
+          SHORT="$(git rev-parse --short=7 HEAD)"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: cmd/gui/frontend/package-lock.json
+
+      # ── Linux: install Wails3 GUI build dependencies ──
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-4-dev \
+            libwebkitgtk-6.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      # ── Install Wails v3 CLI ──
+      - name: Install Wails v3 CLI
+        shell: bash
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # ── Anti-scalper prompt skip (CI only) ──
+      - name: Skip anti-scalper prompt
+        shell: bash
+        run: |
+          mkdir -p data
+          echo "1" > data/.verified
+
+      # ── Build frontend ──
+      - name: Build frontend
+        shell: bash
+        working-directory: cmd/gui/frontend
+        run: |
+          npm ci
+          npm run build
+
+      # ── Generate platform icons ──
+      - name: Generate icons
+        shell: bash
+        working-directory: cmd/gui/build
+        run: |
+          if [ "${{ matrix.platform }}" = "darwin" ]; then
+            wails3 generate icons -input appicon.png \
+              -macfilename darwin/icons.icns \
+              -windowsfilename windows/icon.ico
+          else
+            wails3 generate icons -input appicon.png \
+              -windowsfilename windows/icon.ico
+          fi
+
+      # ── Generate Windows .syso ──
+      - name: Generate Windows syso
+        if: matrix.platform == 'windows'
+        shell: bash
+        working-directory: cmd/gui/build
+        run: |
+          wails3 generate syso -arch ${{ matrix.arch }} \
+            -icon windows/icon.ico \
+            -manifest windows/wails.exe.manifest \
+            -info windows/info.json \
+            -out ../../wails_windows_${{ matrix.arch }}.syso
+
+      # ── Build Go binary (GUI) ──
+      - name: Build GUI binary
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          COMMIT="${{ steps.set_commit.outputs.short }}"
+          BUILD_TIME="${{ steps.vars.outputs.build_time }}"
+          APP_NAME="bilibili-ticket-golang"
+          OUTPUT="build/bin/${APP_NAME}${{ matrix.ext }}"
+
+          TAGS="production,desktop"
+          LDFLAGS="-s -w"
+
+          case "${{ matrix.platform }}" in
+            windows)
+              LDFLAGS="$LDFLAGS -H windowsgui"
+              ;;
+            linux)
+              TAGS="$TAGS,webkit2_41"
+              ;;
+          esac
+
+          LDFLAGS="$LDFLAGS -X bilibili-ticket-golang/lib/global.GitCommit=${COMMIT}"
+          LDFLAGS="$LDFLAGS -X bilibili-ticket-golang/lib/global.BuildTime=${BUILD_TIME}"
+
+          echo "::group::Build info"
+          echo "  Platform: ${{ matrix.platform }} (${{ matrix.arch }})"
+          echo "  GOOS:     $GOOS"
+          echo "  GOARCH:   $GOARCH"
+          echo "  CGO:      $CGO_ENABLED"
+          echo "  Tags:     $TAGS"
+          echo "  LDFLAGS:  $LDFLAGS"
+          echo "  Output:   $OUTPUT"
+          echo "::endgroup::"
+
+          go build \
+            -tags "$TAGS" \
+            -trimpath -buildvcs=false \
+            -ldflags "$LDFLAGS" \
+            -o "$OUTPUT" \
+            ./cmd/gui
+
+      # ── Build ticket worker ──
+      - name: Build ticket worker
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          go build \
+            -trimpath -buildvcs=false \
+            -ldflags "-s -w" \
+            -o "build/bin/ticket-worker${{ matrix.ext }}" \
+            ./cmd/ticket-worker
+
+      # ── Package artifacts ──
+      - name: Package artifacts
+        shell: bash
+        run: |
+          COMMIT="${{ steps.set_commit.outputs.short }}"
+          mkdir -p release
+          APP_NAME="bilibili-ticket-golang"
+          WORKER_NAME="ticket-worker"
+
+          # Package employer (GUI)
+          GUI_SOURCE="build/bin/${APP_NAME}${{ matrix.ext }}"
+          cp "$GUI_SOURCE" "release/${APP_NAME}${{ matrix.ext }}"
+          tar -C release -czf "release/${APP_NAME}_${{ matrix.platform }}_${{ matrix.arch }}_${COMMIT}.tar.gz" "${APP_NAME}${{ matrix.ext }}"
+          rm -f "release/${APP_NAME}${{ matrix.ext }}"
+
+          # Package worker
+          WORKER_SOURCE="build/bin/${WORKER_NAME}${{ matrix.ext }}"
+          cp "$WORKER_SOURCE" "release/${WORKER_NAME}${{ matrix.ext }}"
+          tar -C release -czf "release/${WORKER_NAME}_${{ matrix.platform }}_${{ matrix.arch }}_${COMMIT}.tar.gz" "${WORKER_NAME}${{ matrix.ext }}"
+          rm -f "release/${WORKER_NAME}${{ matrix.ext }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-build-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo || github.repository }}
+          ref: ${{ inputs.source_ref || '' }}
+          token: ${{ secrets.CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Resolve short commit
+        id: set_commit
+        shell: bash
+        run: |
+          SHORT="$(git rev-parse --short=7 HEAD)"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Flatten artifact tree
+        run: |
+          find release-assets -type f -name '*.tar.gz' -exec cp {} release-assets/ \;
+
+      - name: Generate checksums
+        run: |
+          COMMIT="${{ steps.set_commit.outputs.short }}"
+          cd release-assets
+          sha256sum *.tar.gz > "checksums_${COMMIT}.txt"
+
+      # ── Publish to GitHub Release (release-only / both) ──
+      - name: Generate release notes
+        if: inputs.upload_target == 'release-only' || inputs.upload_target == 'both'
+        shell: bash
+        run: |
+          COMMIT="${{ steps.set_commit.outputs.short }}"
+
+          if [ -f .github/release_template.md ]; then
+            sed "s|VERSION|${COMMIT}|g" .github/release_template.md > release.md
+          else
+            echo "## Build ${COMMIT}" > release.md
+          fi
+
+          preTag=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" | \
+            sed -nE 's/.*"tag_name": "([^\"]+)".*/\1/p')
+
+          if [ -n "$preTag" ] && git rev-parse "$preTag" >/dev/null 2>&1; then
+            echo "" >> release.md
+            echo "上一版本: $preTag → 当前: $COMMIT" >> release.md
+            git log --no-merges --pretty=format:"- %s" "$preTag..HEAD" >> release.md
+          else
+            echo "" >> release.md
+            echo "首个发布版本" >> release.md
+            git log --no-merges --pretty=format:"- %s" >> release.md
+          fi
+
+      - name: Publish GitHub Release
+        if: inputs.upload_target == 'release-only' || inputs.upload_target == 'both'
+        uses: softprops/action-gh-release@v2
+        with:
+          token: "${{ secrets.GITHUB_TOKEN }}"
+          tag_name: "${{ steps.set_commit.outputs.short }}"
+          name: "Cross-Build ${{ steps.set_commit.outputs.short }}"
+          draft: false
+          body_path: release.md
+          files: |
+            release-assets/*.tar.gz
+            release-assets/checksums_*.txt
+
+      - name: Cleanup old releases (keep latest 10)
+        if: inputs.upload_target == 'release-only' || inputs.upload_target == 'both'
+        shell: bash
+        run: |
+          RELEASES=$(gh release list --repo "${{ github.repository }}" --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[].tagName')
+          COUNT=0
+          for TAG in $RELEASES; do
+            COUNT=$((COUNT + 1))
+            if [ $COUNT -gt 10 ]; then
+              echo "Deleting old release: $TAG"
+              gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag
+            fi
+          done
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      # ── Upload to Telegram (telegram-only / both) ──
+      - name: Upload to Telegram
+        if: inputs.upload_target == 'telegram-only' || inputs.upload_target == 'both'
+        shell: bash
+        run: |
+          COMMIT="${{ steps.set_commit.outputs.short }}"
+          REPO="${{ inputs.source_repo || github.repository }}"
+          RELEASE_URL="https://github.com/${REPO}/releases/tag/${COMMIT}"
+          BOT="https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
+
+          COMMIT_MSG=$(git log -1 --pretty=%B | head -1 | sed 's/[_*[\]()~`>#+\-=|{}.!]/\\\\&/g')
+
+          MSG_HEAD="🚀 *New Cross-Repo Build*"
+          REPO_LINE="📦 *Repo:* \`${REPO}\`"
+          BRANCH_LINE="🌿 *Ref:* \`${{ inputs.source_ref || 'default' }}\`"
+          TAG_LINE="🔖 *Tag:* \`${COMMIT}\`"
+          MSG_LINE="📝 ${COMMIT_MSG}"
+          LINK_LINE="🔗 [View Release](${RELEASE_URL})"
+
+          TEXT="${MSG_HEAD}%0A%0A${REPO_LINE}%0A${BRANCH_LINE}%0A${TAG_LINE}%0A${MSG_LINE}%0A${LINK_LINE}"
+
+          curl -s -X POST "${BOT}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${TEXT}" \
+            -d "parse_mode=Markdown" \
+            -d "disable_web_page_preview=true"
+
+          # Upload each file to Telegram
+          for FILE in release-assets/*.tar.gz; do
+            curl -s -X POST "${BOT}/sendDocument" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@${FILE}"
+          done
+
+      # ── Cleanup uploaded artifacts ──
+      - name: Delete workflow artifacts
+        if: always()
+        shell: bash
+        run: |
+          echo "Cleaning up artifacts for run ${{ github.run_id }}..."
+          ARTIFACTS=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" --jq '.artifacts[] | select(.name | startswith("cross-build-")) | .id')
+          for ID in $ARTIFACTS; do
+            echo "Deleting artifact $ID..."
+            gh api --method DELETE "/repos/${{ github.repository }}/actions/artifacts/$ID"
+          done
+          echo "Artifact cleanup complete."
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
