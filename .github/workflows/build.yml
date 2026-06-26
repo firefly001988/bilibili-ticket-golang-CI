@@ -7,7 +7,7 @@ on:
         description: "分发目标"
         required: true
         type: choice
-        default: "telegram-only"
+        default: "both"
         options:
           - "release-only"
           - "telegram-only"
@@ -16,7 +16,7 @@ on:
         description: "源仓库分支/tag/commit (留空则用默认分支)"
         required: false
         type: string
-        default: "main"
+        default: ""
 
 permissions:
   contents: write
@@ -81,6 +81,7 @@ jobs:
         with:
           repository: firefly001988/bilibili-ticket-golang-private
           ref: ${{ inputs.source_ref || '' }}
+          token: ${{ secrets.CHECKOUT_TOKEN }}
           fetch-depth: 0
 
       - name: Resolve short commit
@@ -233,6 +234,7 @@ jobs:
         with:
           repository: firefly001988/bilibili-ticket-golang-private
           ref: ${{ inputs.source_ref || '' }}
+          token: ${{ secrets.CHECKOUT_TOKEN }}
           fetch-depth: 0
 
       - name: Resolve short commit
