@@ -138,7 +138,14 @@ jobs:
         run: |
           mkdir -p data
           echo "1" > data/.verified
-
+          
+      # ── Generate Wails bindings ──
+      - name: Generate Wails bindings
+        shell: bash
+        working-directory: cmd/gui
+        run: |
+          wails3 generate bindings
+          
       # ── Build frontend ──
       - name: Build frontend
         shell: bash
