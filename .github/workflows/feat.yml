@@ -29,7 +29,7 @@ permissions:
 
 concurrency:
   group: cross-build-${{ github.run_id }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -151,6 +151,7 @@ jobs:
         shell: bash
         working-directory: cmd/gui/frontend
         run: |
+          npm install
           npm ci
           npm run build
 
