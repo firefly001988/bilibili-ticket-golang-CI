@@ -20,7 +20,7 @@ on:
         description: "源仓库 (owner/repo，留空则用当前仓库)"
         required: false
         type: string
-        default: "firefly001988/bilibili-ticket-golang-private"
+        default: "It-s-bilibili-ticket-golang/bilibili-ticket-golang-private"
       source_ref:
         description: "源仓库分支/tag/commit (留空则用默认分支)"
         required: false
