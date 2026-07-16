@@ -12,6 +12,10 @@ on:
           - "release-only"
           - "telegram-only"
           - "both"
+      tag:
+        description: "Release tag / version (x.y.z)"
+        required: true
+        type: string
       source_repo:
         description: "源仓库 (owner/repo，留空则用当前仓库)"
         required: false
@@ -32,7 +36,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate build inputs and secrets
+        shell: bash
+        env:
+          VERSION: ${{ inputs.tag }}
+          REPORT_DSN: ${{ secrets.ReportDSN }}
+          REPORT_SALT: ${{ secrets.ReportSalt }}
+          GARBLE_SEED: ${{ secrets.GarbleSeed }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must use the x.y.z format (for example: 1.2.3)"
+            exit 1
+          fi
+
+          if [ -z "$REPORT_DSN" ]; then
+            echo "::error::GitHub secret ReportDSN is required"
+            exit 1
+          fi
+
+          if [ -z "$REPORT_SALT" ]; then
+            echo "::error::GitHub secret ReportSalt is required"
+            exit 1
+          fi
+
+          if [ -z "$GARBLE_SEED" ]; then
+            echo "::error::GitHub secret GarbleSeed is required"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import base64
+          import os
+          import sys
+
+          value = os.environ["GARBLE_SEED"]
+          try:
+              seed = base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+          except ValueError as error:
+              print(f"::error::GarbleSeed must be valid standard Base64: {error}")
+              sys.exit(1)
+          if len(seed) < 8:
+              print("::error::GarbleSeed must decode to at least 8 bytes")
+              sys.exit(1)
+          PY
+
   build:
+    needs: validate
     strategy:
       fail-fast: true
       matrix:
@@ -74,8 +126,6 @@ jobs:
             goos: darwin
             cgo: 1
     runs-on: ${{ matrix.os }}
-    outputs:
-      commit_short: ${{ steps.set_commit.outputs.short }}
     steps:
       - name: Set build time
         id: vars
@@ -125,11 +175,12 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
-      # ── Install Wails v3 CLI ──
-      - name: Install Wails v3 CLI
+      # ── Install Wails v3 and Garble CLIs ──
+      - name: Install build CLIs
         shell: bash
         run: |
           go install github.com/wailsapp/wails/v3/cmd/wails3@latest
+          go install mvdan.cc/garble@v0.16.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       # ── Anti-scalper prompt skip (CI only) ──
@@ -137,94 +188,58 @@ jobs:
         shell: bash
         run: |
           mkdir -p data
+          echo "1" > data/.privacy-tos-v1.accepted
           echo "1" > data/.verified
-          
-      # ── Generate Wails bindings ──
-      - name: Generate Wails bindings
+
+      # ── Build obfuscated GUI through Wails3 ──
+      - name: Build obfuscated GUI binary
         shell: bash
         working-directory: cmd/gui
-        run: |
-          wails3 generate bindings
-          
-      # ── Build frontend ──
-      - name: Build frontend
-        shell: bash
-        working-directory: cmd/gui/frontend
-        run: |
-          npm install
-          npm ci
-          npm run build
-
-      # ── Generate platform icons ──
-      - name: Generate icons
-        shell: bash
-        working-directory: cmd/gui/build
-        run: |
-          if [ "${{ matrix.platform }}" = "darwin" ]; then
-            wails3 generate icons -input appicon.png \
-              -macfilename darwin/icons.icns \
-              -windowsfilename windows/icon.ico
-          else
-            wails3 generate icons -input appicon.png \
-              -windowsfilename windows/icon.ico
-          fi
-
-      # ── Generate Windows .syso ──
-      - name: Generate Windows syso
-        if: matrix.platform == 'windows'
-        shell: bash
-        working-directory: cmd/gui/build
-        run: |
-          wails3 generate syso -arch ${{ matrix.arch }} \
-            -icon windows/icon.ico \
-            -manifest windows/wails.exe.manifest \
-            -info windows/info.json \
-            -out ../../wails_windows_${{ matrix.arch }}.syso
-
-      # ── Build Go binary (GUI) ──
-      - name: Build GUI binary
-        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: ${{ matrix.cgo }}
+          VERSION: ${{ inputs.tag }}
+          REPORT_DSN: ${{ secrets.REPORT_DSN }}
+          REPORT_SALT: ${{ secrets.REPORT_SALT }}
+          GARBLE_SEED: ${{ secrets.GARBLE_SEED }}
         run: |
           COMMIT="${{ steps.set_commit.outputs.short }}"
           BUILD_TIME="${{ steps.vars.outputs.build_time }}"
-          APP_NAME="bilibili-ticket-golang"
-          OUTPUT="build/bin/${APP_NAME}${{ matrix.ext }}"
-
-          TAGS="production,desktop"
-          LDFLAGS="-s -w"
+          EXTRA_TAGS="desktop"
+          EXTRA_LDFLAGS=""
 
           case "${{ matrix.platform }}" in
             windows)
-              LDFLAGS="$LDFLAGS -H windowsgui"
+              EXTRA_LDFLAGS="-H windowsgui"
               ;;
             linux)
-              TAGS="$TAGS,webkit2_41"
+              EXTRA_TAGS="$EXTRA_TAGS,webkit2_41"
               ;;
           esac
 
-          LDFLAGS="$LDFLAGS -X bilibili-ticket-golang/lib/global.GitCommit=${COMMIT}"
-          LDFLAGS="$LDFLAGS -X bilibili-ticket-golang/lib/global.BuildTime=${BUILD_TIME}"
+          EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X bilibili-ticket-golang/lib/global.GitCommit=${COMMIT}"
+          EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X bilibili-ticket-golang/lib/global.BuildTime=${BUILD_TIME}"
+          EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X 'bilibili-ticket-golang/lib/global.Version=${VERSION}'"
+          EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportDSN=${REPORT_DSN}'"
+          EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportSalt=${REPORT_SALT}'"
 
           echo "::group::Build info"
           echo "  Platform: ${{ matrix.platform }} (${{ matrix.arch }})"
           echo "  GOOS:     $GOOS"
           echo "  GOARCH:   $GOARCH"
           echo "  CGO:      $CGO_ENABLED"
-          echo "  Tags:     $TAGS"
-          echo "  LDFLAGS:  $LDFLAGS"
-          echo "  Output:   $OUTPUT"
+          echo "  Tags:     $EXTRA_TAGS"
+          echo "  Version:  $VERSION"
+          echo "  Output:   cmd/gui/bin/bilibili-ticket-golang${{ matrix.ext }}"
           echo "::endgroup::"
 
-          go build \
-            -tags "$TAGS" \
-            -trimpath -buildvcs=false \
-            -ldflags "$LDFLAGS" \
-            -o "$OUTPUT" \
-            ./cmd/gui
+          wails3 build \
+            -obfuscated \
+            -garbleargs "-literals -tiny -seed=${GARBLE_SEED}" \
+            -tags "$EXTRA_TAGS" \
+            ARCH="${{ matrix.arch }}" \
+            EXTRA_LDFLAGS="$EXTRA_LDFLAGS"
 
       # ── Build ticket worker ──
       - name: Build ticket worker
@@ -233,13 +248,20 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
+          VERSION: ${{ inputs.tag }}
+          REPORT_DSN: ${{ secrets.REPORT_DSN }}
+          REPORT_SALT: ${{ secrets.REPORT_SALT }}
+          GARBLE_SEED: ${{ secrets.GARBLE_SEED }}
         run: |
           COMMIT="${{ steps.set_commit.outputs.short }}"
           BUILD_TIME="${{ steps.vars.outputs.build_time }}"
           LDFLAGS="-s -w"
           LDFLAGS="$LDFLAGS -X bilibili-ticket-golang/lib/global.GitCommit=${COMMIT}"
           LDFLAGS="$LDFLAGS -X bilibili-ticket-golang/lib/global.BuildTime=${BUILD_TIME}"
-          go build \
+          LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.Version=${VERSION}'"
+          LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportDSN=${REPORT_DSN}'"
+          LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportSalt=${REPORT_SALT}'"
+          garble -literals -tiny -seed="$GARBLE_SEED" build \
             -trimpath -buildvcs=false \
             -ldflags "$LDFLAGS" \
             -o "build/bin/ticket-worker${{ matrix.ext }}" \
@@ -248,22 +270,23 @@ jobs:
       # ── Package artifacts ──
       - name: Package artifacts
         shell: bash
+        env:
+          VERSION: ${{ inputs.tag }}
         run: |
-          COMMIT="${{ steps.set_commit.outputs.short }}"
           mkdir -p release
           APP_NAME="bilibili-ticket-golang"
           WORKER_NAME="ticket-worker"
 
           # Package employer (GUI)
-          GUI_SOURCE="build/bin/${APP_NAME}${{ matrix.ext }}"
+          GUI_SOURCE="cmd/gui/bin/${APP_NAME}${{ matrix.ext }}"
           cp "$GUI_SOURCE" "release/${APP_NAME}${{ matrix.ext }}"
-          tar -C release -czf "release/${APP_NAME}_${{ matrix.platform }}_${{ matrix.arch }}_${COMMIT}.tar.gz" "${APP_NAME}${{ matrix.ext }}"
+          tar -C release -czf "release/${APP_NAME}_${{ matrix.platform }}_${{ matrix.arch }}_${VERSION}.tar.gz" "${APP_NAME}${{ matrix.ext }}"
           rm -f "release/${APP_NAME}${{ matrix.ext }}"
 
           # Package worker
           WORKER_SOURCE="build/bin/${WORKER_NAME}${{ matrix.ext }}"
           cp "$WORKER_SOURCE" "release/${WORKER_NAME}${{ matrix.ext }}"
-          tar -C release -czf "release/${WORKER_NAME}_${{ matrix.platform }}_${{ matrix.arch }}_${COMMIT}.tar.gz" "${WORKER_NAME}${{ matrix.ext }}"
+          tar -C release -czf "release/${WORKER_NAME}_${{ matrix.platform }}_${{ matrix.arch }}_${VERSION}.tar.gz" "${WORKER_NAME}${{ matrix.ext }}"
           rm -f "release/${WORKER_NAME}${{ matrix.ext }}"
 
       - name: Upload build artifact
@@ -285,13 +308,6 @@ jobs:
           token: ${{ secrets.CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Resolve short commit
-        id: set_commit
-        shell: bash
-        run: |
-          SHORT="$(git rev-parse --short=7 HEAD)"
-          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
-
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -302,22 +318,23 @@ jobs:
           find release-assets -type f -name '*.tar.gz' -exec cp {} release-assets/ \;
 
       - name: Generate checksums
+        env:
+          VERSION: ${{ inputs.tag }}
         run: |
-          COMMIT="${{ steps.set_commit.outputs.short }}"
           cd release-assets
-          sha256sum *.tar.gz > "checksums_${COMMIT}.txt"
+          sha256sum *.tar.gz > "checksums_${VERSION}.txt"
 
       # ── Publish to GitHub Release (release-only / both) ──
       - name: Generate release notes
         if: inputs.upload_target == 'release-only' || inputs.upload_target == 'both'
         shell: bash
+        env:
+          VERSION: ${{ inputs.tag }}
         run: |
-          COMMIT="${{ steps.set_commit.outputs.short }}"
-
           if [ -f .github/release_template.md ]; then
-            sed "s|VERSION|${COMMIT}|g" .github/release_template.md > release.md
+            sed "s|VERSION|${VERSION}|g" .github/release_template.md > release.md
           else
-            echo "## Build ${COMMIT}" > release.md
+            echo "## Build ${VERSION}" > release.md
           fi
 
           preTag=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" | \
@@ -325,7 +342,7 @@ jobs:
 
           if [ -n "$preTag" ] && git rev-parse "$preTag" >/dev/null 2>&1; then
             echo "" >> release.md
-            echo "上一版本: $preTag → 当前: $COMMIT" >> release.md
+            echo "上一版本: $preTag → 当前: $VERSION" >> release.md
             git log --no-merges --pretty=format:"- %s" "$preTag..HEAD" >> release.md
           else
             echo "" >> release.md
@@ -338,8 +355,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
-          tag_name: "${{ steps.set_commit.outputs.short }}"
-          name: "Cross-Build ${{ steps.set_commit.outputs.short }}"
+          tag_name: "${{ inputs.tag }}"
+          name: "Cross-Build ${{ inputs.tag }}"
           draft: false
           body_path: release.md
           files: |
@@ -366,10 +383,11 @@ jobs:
       - name: Upload to Telegram
         if: inputs.upload_target == 'telegram-only' || inputs.upload_target == 'both'
         shell: bash
+        env:
+          VERSION: ${{ inputs.tag }}
         run: |
-          COMMIT="${{ steps.set_commit.outputs.short }}"
           REPO="${{ inputs.source_repo || github.repository }}"
-          RELEASE_URL="https://github.com/${REPO}/releases/tag/${COMMIT}"
+          RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
           BOT="https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}"
           CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
 
@@ -378,7 +396,7 @@ jobs:
           MSG_HEAD="🚀 *New Build* #beta #release #2026"
           REPO_LINE="📦 *Repo:* \`${REPO}\`"
           BRANCH_LINE="🌿 *Ref:* \`${{ inputs.source_ref || 'default' }}\`"
-          TAG_LINE="🔖 *Tag:* \`${COMMIT}\`"
+          TAG_LINE="🔖 *Tag:* \`${VERSION}\`"
           MSG_LINE="📝 ${COMMIT_MSG}"
           LINK_LINE="🔗 [View Release](${RELEASE_URL})"
 
