@@ -16,11 +16,6 @@ on:
         description: "Release tag / version (x.y.z)"
         required: true
         type: string
-      source_repo:
-        description: "源仓库 (owner/repo，留空则用当前仓库)"
-        required: false
-        type: string
-        default: "It-s-bilibili-ticket-golang/bilibili-ticket-golang-private"
       source_ref:
         description: "源仓库分支/tag/commit (留空则用默认分支)"
         required: false
@@ -46,6 +41,7 @@ jobs:
           REPORT_DSN: ${{ secrets.REPORT_DSN }}
           REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
           GARBLE_SEED: ${{ secrets.GARBLE_SEED }}
+          CHECKOUT_TOKEN: ${{ secrets.CHECKOUT_TOKEN }}
         run: |
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::tag must use the x.y.z format (for example: 1.2.3)"
@@ -64,6 +60,11 @@ jobs:
 
           if [ -z "$GARBLE_SEED" ]; then
             echo "::error::GitHub secret GarbleSeed is required"
+            exit 1
+          fi
+
+          if [ -z "$CHECKOUT_TOKEN" ]; then
+            echo "::error::GitHub secret CHECKOUT_TOKEN is required for the private cloud-control repository"
             exit 1
           fi
 
@@ -95,7 +96,7 @@ jobs:
   build:
     needs: validate
     env:
-      GOGARBLE: "bilibili-ticket-golang/*"
+      GOGARBLE: "bilibili-ticket-golang/*,bilibili-ticket-golang-cloudcontrol/client/*"
     strategy:
       fail-fast: true
       matrix:
@@ -148,10 +149,19 @@ jobs:
       - name: Checkout source repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.source_repo || github.repository }}
+          repository: It-s-bilibili-ticket-golang/bilibili-ticket-golang-private
           ref: ${{ inputs.source_ref || '' }}
           token: ${{ secrets.CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+
+      - name: Checkout private cloud-control client
+        uses: actions/checkout@v4
+        with:
+          repository: It-s-bilibili-ticket-golang/bilibili-ticket-golang-telemetry
+          ref: main
+          token: ${{ secrets.CHECKOUT_TOKEN }}
+          path: .private/cloudcontrol
+          fetch-depth: 1
 
       - name: Resolve short commit
         id: set_commit
@@ -163,9 +173,11 @@ jobs:
       - name: Verify fail-closed cloud-control wiring
         shell: bash
         run: |
-          test -f process/controller.go
           test -f lib/cloudcontrol/cloudcontrol.go
-          ! grep -R "global.ReportSalt\|NewConfiguredReportClient" --include='*.go' cmd process lib
+          test -f lib/cloudbootstrap/provider_private.go
+          test ! -d process
+          test -f .private/cloudcontrol/client/controller.go
+          ! grep -R "global.ReportSalt\|NewConfiguredReportClient" --include='*.go' cmd lib
           ! grep -R "NewNoopReportClient" --include='*.go' cmd
 
       - name: Set up Go
@@ -173,6 +185,12 @@ jobs:
         with:
           go-version: "1.26"
           cache: false
+
+      - name: Compose private Go workspace
+        shell: bash
+        run: |
+          test -f .private/cloudcontrol/client/go.mod
+          go work use ./.private/cloudcontrol/client
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -267,7 +285,7 @@ jobs:
         run: |
           COMMIT="${{ steps.set_commit.outputs.short }}"
           BUILD_TIME="${{ steps.vars.outputs.build_time }}"
-          EXTRA_TAGS="production,desktop"
+          EXTRA_TAGS="production,desktop,cloudcontrol"
           EXTRA_LDFLAGS="-X bilibili-ticket-golang/lib/global.GitCommit=${COMMIT}"
 
           case "${{ matrix.platform }}" in
@@ -319,7 +337,7 @@ jobs:
           LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportDSN=${REPORT_DSN}'"
           LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportPublicKey=${REPORT_PUBLIC_KEY}'"
           garble -literals -tiny -seed="$GARBLE_SEED" build \
-            -tags production -trimpath -buildvcs=false \
+            -tags "production,cloudcontrol" -trimpath -buildvcs=false \
             -ldflags "$LDFLAGS" \
             -o "build/bin/ticket-worker${{ matrix.ext }}" \
             ./cmd/ticket-worker
@@ -360,7 +378,7 @@ jobs:
       - name: Checkout source repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.source_repo || github.repository }}
+          repository: It-s-bilibili-ticket-golang/bilibili-ticket-golang-private
           ref: ${{ inputs.source_ref || '' }}
           token: ${{ secrets.CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           fetch-depth: 0
@@ -443,7 +461,7 @@ jobs:
         env:
           VERSION: ${{ inputs.tag }}
         run: |
-          REPO="${{ inputs.source_repo || github.repository }}"
+          REPO="It-s-bilibili-ticket-golang/bilibili-ticket-golang-private"
           RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
           BOT="https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}"
           CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"

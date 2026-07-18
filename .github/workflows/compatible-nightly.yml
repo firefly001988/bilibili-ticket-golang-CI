@@ -16,11 +16,6 @@ on:
         description: "构建版本号 (例如 v1.2.3)"
         required: true
         type: string
-      source_repo:
-        description: "源仓库 (owner/repo，留空则用当前仓库)"
-        required: false
-        type: string
-        default: "firefly001988/bilibili-ticket-golang-private"
       source_ref:
         description: "源仓库分支/tag/commit (留空则用默认分支)"
         required: false
@@ -44,9 +39,11 @@ jobs:
         env:
           REPORT_DSN: ${{ secrets.REPORT_DSN }}
           REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
+          CHECKOUT_TOKEN: ${{ secrets.CHECKOUT_TOKEN }}
         run: |
           : "${REPORT_DSN:?REPORT_DSN secret is required}"
           : "${REPORT_PUBLIC_KEY:?REPORT_PUBLIC_KEY secret is required}"
+          : "${CHECKOUT_TOKEN:?CHECKOUT_TOKEN secret is required for the private cloud-control repository}"
           python3 - <<'PY'
           import base64, os, sys
           value = os.environ["REPORT_PUBLIC_KEY"]
@@ -114,15 +111,31 @@ jobs:
       - name: Checkout source repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.source_repo || github.repository }}
+          repository: It-s-bilibili-ticket-golang/bilibili-ticket-golang-private
           ref: ${{ inputs.source_ref || '' }}
           token: ${{ secrets.CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+
+      - name: Checkout private cloud-control client
+        uses: actions/checkout@v4
+        with:
+          repository: It-s-bilibili-ticket-golang/bilibili-ticket-golang-telemetry
+          ref: main
+          token: ${{ secrets.CHECKOUT_TOKEN }}
+          path: .private/cloudcontrol
+          fetch-depth: 1
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+
+      - name: Compose private Go workspace
+        shell: bash
+        run: |
+          test -f .private/cloudcontrol/client/go.mod
+          test ! -d process
+          go work use ./.private/cloudcontrol/client
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -216,7 +229,7 @@ jobs:
           APP_NAME="bilibili-ticket-golang"
           OUTPUT="build/bin/${APP_NAME}${{ matrix.ext }}"
 
-          TAGS="production,desktop"
+          TAGS="production,desktop,cloudcontrol"
           LDFLAGS="-s -w"
 
           case "${{ matrix.platform }}" in
@@ -279,7 +292,7 @@ jobs:
       - name: Checkout source repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.source_repo || github.repository }}
+          repository: It-s-bilibili-ticket-golang/bilibili-ticket-golang-private
           ref: ${{ inputs.source_ref || '' }}
           token: ${{ secrets.CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
           fetch-depth: 0
@@ -360,7 +373,7 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ inputs.build_version }}"
-          REPO="${{ inputs.source_repo || github.repository }}"
+          REPO="It-s-bilibili-ticket-golang/bilibili-ticket-golang-private"
           RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
           BOT="https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}"
           CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
