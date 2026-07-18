@@ -44,7 +44,7 @@ jobs:
         env:
           VERSION: ${{ inputs.tag }}
           REPORT_DSN: ${{ secrets.REPORT_DSN }}
-          REPORT_SALT: ${{ secrets.REPORT_SALT }}
+          REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
           GARBLE_SEED: ${{ secrets.GARBLE_SEED }}
         run: |
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -57,8 +57,8 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$REPORT_SALT" ]; then
-            echo "::error::GitHub secret ReportSalt is required"
+          if [ -z "$REPORT_PUBLIC_KEY" ]; then
+            echo "::error::GitHub secret REPORT_PUBLIC_KEY is required"
             exit 1
           fi
 
@@ -80,6 +80,15 @@ jobs:
               sys.exit(1)
           if len(seed) < 8:
               print("::error::GarbleSeed must decode to at least 8 bytes")
+              sys.exit(1)
+
+          try:
+              public_key = base64.b64decode(os.environ["REPORT_PUBLIC_KEY"] + "=" * (-len(os.environ["REPORT_PUBLIC_KEY"]) % 4), validate=True)
+          except ValueError as error:
+              print(f"::error::REPORT_PUBLIC_KEY must be valid standard Base64: {error}")
+              sys.exit(1)
+          if len(public_key) != 32:
+              print("::error::REPORT_PUBLIC_KEY must decode to a 32-byte Ed25519 public key")
               sys.exit(1)
           PY
 
@@ -150,6 +159,14 @@ jobs:
         run: |
           SHORT="$(git rev-parse --short=7 HEAD)"
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+
+      - name: Verify fail-closed cloud-control wiring
+        shell: bash
+        run: |
+          test -f process/controller.go
+          test -f lib/cloudcontrol/cloudcontrol.go
+          ! grep -R "global.ReportSalt\|NewConfiguredReportClient" --include='*.go' cmd process lib
+          ! grep -R "NewNoopReportClient" --include='*.go' cmd
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -245,12 +262,12 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
           VERSION: ${{ inputs.tag }}
           REPORT_DSN: ${{ secrets.REPORT_DSN }}
-          REPORT_SALT: ${{ secrets.REPORT_SALT }}
+          REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
           GARBLE_SEED: ${{ secrets.GARBLE_SEED }}
         run: |
           COMMIT="${{ steps.set_commit.outputs.short }}"
           BUILD_TIME="${{ steps.vars.outputs.build_time }}"
-          EXTRA_TAGS="desktop"
+          EXTRA_TAGS="production,desktop"
           EXTRA_LDFLAGS="-X bilibili-ticket-golang/lib/global.GitCommit=${COMMIT}"
 
           case "${{ matrix.platform }}" in
@@ -262,7 +279,7 @@ jobs:
           EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X bilibili-ticket-golang/lib/global.BuildTime=${BUILD_TIME}"
           EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X 'bilibili-ticket-golang/lib/global.Version=${VERSION}'"
           EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportDSN=${REPORT_DSN}'"
-          EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportSalt=${REPORT_SALT}'"
+          EXTRA_LDFLAGS="$EXTRA_LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportPublicKey=${REPORT_PUBLIC_KEY}'"
 
           echo "::group::Build info"
           echo "  Platform: ${{ matrix.platform }} (${{ matrix.arch }})"
@@ -290,7 +307,7 @@ jobs:
           CGO_ENABLED: 0
           VERSION: ${{ inputs.tag }}
           REPORT_DSN: ${{ secrets.REPORT_DSN }}
-          REPORT_SALT: ${{ secrets.REPORT_SALT }}
+          REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
           GARBLE_SEED: ${{ secrets.GARBLE_SEED }}
         run: |
           COMMIT="${{ steps.set_commit.outputs.short }}"
@@ -300,9 +317,9 @@ jobs:
           LDFLAGS="$LDFLAGS -X bilibili-ticket-golang/lib/global.BuildTime=${BUILD_TIME}"
           LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.Version=${VERSION}'"
           LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportDSN=${REPORT_DSN}'"
-          LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportSalt=${REPORT_SALT}'"
+          LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportPublicKey=${REPORT_PUBLIC_KEY}'"
           garble -literals -tiny -seed="$GARBLE_SEED" build \
-            -trimpath -buildvcs=false \
+            -tags production -trimpath -buildvcs=false \
             -ldflags "$LDFLAGS" \
             -o "build/bin/ticket-worker${{ matrix.ext }}" \
             ./cmd/ticket-worker

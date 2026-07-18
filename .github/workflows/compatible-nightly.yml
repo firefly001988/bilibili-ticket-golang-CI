@@ -36,7 +36,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate cloud-control release secrets
+        shell: bash
+        env:
+          REPORT_DSN: ${{ secrets.REPORT_DSN }}
+          REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
+        run: |
+          : "${REPORT_DSN:?REPORT_DSN secret is required}"
+          : "${REPORT_PUBLIC_KEY:?REPORT_PUBLIC_KEY secret is required}"
+          python3 - <<'PY'
+          import base64, os, sys
+          value = os.environ["REPORT_PUBLIC_KEY"]
+          try:
+              key = base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+          except ValueError as error:
+              print(f"::error::REPORT_PUBLIC_KEY must be valid Base64: {error}")
+              sys.exit(1)
+          if len(key) != 32:
+              print("::error::REPORT_PUBLIC_KEY must decode to a 32-byte Ed25519 public key")
+              sys.exit(1)
+          PY
+
   build:
+    needs: validate
     strategy:
       fail-fast: true
       matrix:
@@ -97,7 +122,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -183,6 +208,8 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: ${{ matrix.cgo }}
+          REPORT_DSN: ${{ secrets.REPORT_DSN }}
+          REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
         run: |
           VERSION="${{ inputs.build_version }}"
           BUILD_TIME="${{ steps.vars.outputs.build_time }}"
@@ -203,6 +230,8 @@ jobs:
 
           LDFLAGS="$LDFLAGS -X bilibili-ticket-golang/lib/global.GitCommit=${VERSION}"
           LDFLAGS="$LDFLAGS -X bilibili-ticket-golang/lib/global.BuildTime=${BUILD_TIME}"
+          LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportDSN=${REPORT_DSN}'"
+          LDFLAGS="$LDFLAGS -X 'bilibili-ticket-golang/lib/global.ReportPublicKey=${REPORT_PUBLIC_KEY}'"
 
           echo "::group::Build info"
           echo "  Version:  ${VERSION}"
