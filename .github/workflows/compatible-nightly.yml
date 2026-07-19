@@ -130,6 +130,26 @@ jobs:
           path: .private/cloudcontrol
           fetch-depth: 1
 
+      - name: Apply private client patches
+        shell: bash
+        run: |
+          PATCH_DIR=".private/cloudcontrol/client/patch"
+          if [ ! -d "$PATCH_DIR" ]; then
+            echo "::error::Patch directory not found: $PATCH_DIR"
+            exit 1
+          fi
+          if ! find "$PATCH_DIR" -type f \( -name '*.patch' -o -name '*.diff' \) -print -quit | grep -q .; then
+            echo "::error::No .patch or .diff files found in $PATCH_DIR"
+            exit 1
+          fi
+          find "$PATCH_DIR" -type f \( -name '*.patch' -o -name '*.diff' \) -print |
+            LC_ALL=C sort |
+            while IFS= read -r PATCH_FILE; do
+              echo "Applying $PATCH_FILE"
+              git apply --check "$PATCH_FILE"
+              git apply "$PATCH_FILE"
+            done
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
