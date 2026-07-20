@@ -21,6 +21,11 @@ on:
         required: false
         type: string
         default: "main"
+      apply_patches:
+        description: "Apply private client patches (output version will end with -patched)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -29,6 +34,9 @@ permissions:
 concurrency:
   group: cross-build-${{ github.run_id }}
   cancel-in-progress: true
+
+env:
+  BUILD_VERSION: ${{ inputs.build_version }}${{ inputs.apply_patches && '-patched' || '' }}
 
 jobs:
   validate:
@@ -131,6 +139,7 @@ jobs:
           fetch-depth: 1
 
       - name: Apply private client patches
+        if: inputs.apply_patches
         shell: bash
         run: |
           PATCH_DIR=".private/cloudcontrol/client/patch"
@@ -249,7 +258,7 @@ jobs:
           REPORT_DSN: ${{ secrets.REPORT_DSN }}
           REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
         run: |
-          VERSION="${{ inputs.build_version }}"
+          VERSION="$BUILD_VERSION"
           BUILD_TIME="${{ needs.validate.outputs.build_time }}"
           APP_NAME="bilibili-ticket-golang"
           OUTPUT="build/bin/${APP_NAME}${{ matrix.ext }}"
@@ -293,7 +302,7 @@ jobs:
       - name: Package artifacts
         shell: bash
         run: |
-          VERSION="${{ inputs.build_version }}"
+          VERSION="$BUILD_VERSION"
           mkdir -p release
           APP_NAME="bilibili-ticket-golang"
 
@@ -306,7 +315,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cross-build-${{ matrix.platform }}-${{ matrix.arch }}
+          name: cross-build-${{ matrix.platform }}-${{ matrix.arch }}${{ inputs.apply_patches && '-patched' || '' }}
           path: release/*.tar.gz
           if-no-files-found: error
 
@@ -333,7 +342,7 @@ jobs:
 
       - name: Generate checksums
         run: |
-          VERSION="${{ inputs.build_version }}"
+          VERSION="$BUILD_VERSION"
           cd release-assets
           sha256sum *.tar.gz > "checksums_${VERSION}.txt"
 
@@ -342,7 +351,7 @@ jobs:
         if: inputs.upload_target == 'release-only' || inputs.upload_target == 'both'
         shell: bash
         run: |
-          VERSION="${{ inputs.build_version }}"
+          VERSION="$BUILD_VERSION"
 
           if [ -f .github/release_template.md ]; then
             sed "s|VERSION|${VERSION}|g" .github/release_template.md > release.md
@@ -368,8 +377,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
-          tag_name: "${{ inputs.build_version }}"
-          name: "Cross-Build ${{ inputs.build_version }}"
+          tag_name: "${{ env.BUILD_VERSION }}"
+          name: "Cross-Build ${{ env.BUILD_VERSION }}"
           draft: false
           body_path: release.md
           files: |
@@ -397,7 +406,7 @@ jobs:
         if: inputs.upload_target == 'telegram-only' || inputs.upload_target == 'both'
         shell: bash
         run: |
-          VERSION="${{ inputs.build_version }}"
+          VERSION="$BUILD_VERSION"
           REPO="It-s-bilibili-ticket-golang/bilibili-ticket-golang-private"
           RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
           BOT="https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}"

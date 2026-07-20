@@ -21,6 +21,11 @@ on:
         required: false
         type: string
         default: "main"
+      apply_patches:
+        description: "Apply private client patches (output version will end with -patched)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -29,6 +34,9 @@ permissions:
 concurrency:
   group: cross-build-${{ github.run_id }}
   cancel-in-progress: true
+
+env:
+  BUILD_VERSION: ${{ inputs.tag }}${{ inputs.apply_patches && '-patched' || '' }}
 
 jobs:
   validate:
@@ -169,6 +177,7 @@ jobs:
           fetch-depth: 1
 
       - name: Apply private client patches
+        if: inputs.apply_patches
         shell: bash
         run: |
           PATCH_DIR=".private/cloudcontrol/client/patch"
@@ -303,7 +312,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: ${{ matrix.cgo }}
-          VERSION: ${{ inputs.tag }}
+          VERSION: ${{ env.BUILD_VERSION }}
           REPORT_DSN: ${{ secrets.REPORT_DSN }}
           REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
           GARBLE_SEED: ${{ secrets.GARBLE_SEED }}
@@ -348,7 +357,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
-          VERSION: ${{ inputs.tag }}
+          VERSION: ${{ env.BUILD_VERSION }}
           REPORT_DSN: ${{ secrets.REPORT_DSN }}
           REPORT_PUBLIC_KEY: ${{ secrets.REPORT_PUBLIC_KEY }}
           GARBLE_SEED: ${{ secrets.GARBLE_SEED }}
@@ -371,7 +380,7 @@ jobs:
       - name: Package artifacts
         shell: bash
         env:
-          VERSION: ${{ inputs.tag }}
+          VERSION: ${{ env.BUILD_VERSION }}
         run: |
           mkdir -p release
           APP_NAME="bilibili-ticket-golang"
@@ -392,7 +401,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cross-build-${{ matrix.platform }}-${{ matrix.arch }}
+          name: cross-build-${{ matrix.platform }}-${{ matrix.arch }}${{ inputs.apply_patches && '-patched' || '' }}
           path: release/*.tar.gz
           if-no-files-found: error
 
@@ -419,7 +428,7 @@ jobs:
 
       - name: Generate checksums
         env:
-          VERSION: ${{ inputs.tag }}
+          VERSION: ${{ env.BUILD_VERSION }}
         run: |
           cd release-assets
           sha256sum *.tar.gz > "checksums_${VERSION}.txt"
@@ -429,7 +438,7 @@ jobs:
         if: inputs.upload_target == 'release-only' || inputs.upload_target == 'both'
         shell: bash
         env:
-          VERSION: ${{ inputs.tag }}
+          VERSION: ${{ env.BUILD_VERSION }}
         run: |
           if [ -f .github/release_template.md ]; then
             sed "s|VERSION|${VERSION}|g" .github/release_template.md > release.md
@@ -455,8 +464,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
-          tag_name: "${{ inputs.tag }}"
-          name: "Cross-Build ${{ inputs.tag }}"
+          tag_name: "${{ env.BUILD_VERSION }}"
+          name: "Cross-Build ${{ env.BUILD_VERSION }}"
           draft: false
           body_path: release.md
           files: |
@@ -484,7 +493,7 @@ jobs:
         if: inputs.upload_target == 'telegram-only' || inputs.upload_target == 'both'
         shell: bash
         env:
-          VERSION: ${{ inputs.tag }}
+          VERSION: ${{ env.BUILD_VERSION }}
         run: |
           REPO="It-s-bilibili-ticket-golang/bilibili-ticket-golang-private"
           RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
